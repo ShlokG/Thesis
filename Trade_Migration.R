@@ -314,20 +314,27 @@ flow_cfs = flow_df %>%
          trade_in_07 = ifelse(all(is.na(trade_in_07)),NA,trade_in_07[which(!is.na(trade_in_07))]),
          trade_out_12 = ifelse(all(is.na(trade_out_12)),NA,trade_out_12[which(!is.na(trade_out_12))]),
          trade_in_12 = ifelse(all(is.na(trade_in_12)),NA,trade_in_12[which(!is.na(trade_in_12))]),
-         distances = mean(distance,na.rm=T)) %>%
+         
+         orig_lon = median(orig_lon,na.rm=T),
+         orig_lat = median(orig_lat,na.rm=T),
+         dest_lon = median(dest_lon,na.rm=T),
+         dest_lat = median(dest_lat,na.rm=T)) %>%
+  
   group_by(orig_cfs12, dest_cfs12, 
-           trade_out_07, trade_in_07, trade_out_12, trade_in_12,distances) %>%
+           trade_out_07, trade_in_07, trade_out_12, trade_in_12,
+           orig_lon, orig_lat, dest_lon, dest_lat) %>%
   summarise_at(vars(Outflow16:Inflow05,orig_POPESTIMATE2000:dest_POPESTIMATE2018),
                funs_cfs)
 
 # Removing unnecessary columns
-flow_cfs = flow_cfs[,-c(152:189)]
-flow_cfs = flow_cfs[,-c(112:120)]
-flow_cfs = flow_cfs[,-c(61:101)]
-flow_cfs = flow_cfs[,-c(42:51)]
-flow_cfs = flow_cfs[,-c(10:31)]
+flow_cfs = flow_cfs[,-c(153:190)]
+flow_cfs = flow_cfs[,-c(113:121)]
+flow_cfs = flow_cfs[,-c(62:102)]
+flow_cfs = flow_cfs[,-c(43:52)]
+flow_cfs = flow_cfs[,-c(11:32)]
 
-
+flow_cfs$distances = spherical_law_cosines(flow_cfs$orig_lat, flow_cfs$orig_lon,
+                                           flow_cfs$dest_lat, flow_cfs$dest_lon)
 
 
 # 09/23/19: Let's calculate the gravity equation 
@@ -351,7 +358,7 @@ flow_cfs_reg2 = subset(flow_cfs, Outflow13_migs+Inflow13_migs > 0)
 
 mig_reg12 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)) + 
                         I(log(orig_POPESTIMATE2011_origs)) + I(log(dest_POPESTIMATE2011_dests)) + 
-                        I(log(trade_out_07+trade_in_07)), data=flow_cfs_reg2))
+                        I(log(trade_out_12+trade_in_12)), data=flow_cfs_reg2))
 
 mig_reg12_2 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)) + 
                         I(log(orig_POPESTIMATE2011_origs)) + I(log(dest_POPESTIMATE2011_dests)), data=flow_cfs_reg2))
@@ -359,15 +366,118 @@ mig_reg12_2 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)
 
 # Subsetting to top 20 CFS Areas by population
 flow_cfs_max = subset(flow_cfs,orig_cfs12==dest_cfs12)
-flow_cfs_max$orig_POPESTIMATE2012_origs[order(-flow_cfs_max$orig_POPESTIMATE2012_origs)[1:20]]
+top_20 = flow_cfs_max$orig_cfs12[order(-flow_cfs_max$orig_POPESTIMATE2012_origs)[1:20]]
+
+cfs_20 = subset(flow_cfs, orig_cfs12 %in% top_20 & dest_cfs12 %in% top_20)
+
+# Runnig gravity equation for migration with subsetted data
+# Regression for 2012
+flow_cfs_reg20 = subset(cfs_20, Outflow13_migs+Inflow13_migs > 0)
+
+mig_reg12_20 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)) + 
+                         I(log(orig_POPESTIMATE2011_origs)) + I(log(dest_POPESTIMATE2011_dests)) + 
+                         I(log(trade_out_12+trade_in_12)), data=flow_cfs_reg20))
+
+mig_reg12_2_20 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)) + 
+                           I(log(orig_POPESTIMATE2011_origs)) + I(log(dest_POPESTIMATE2011_dests)), data=flow_cfs_reg20))
+
+
+# Now, let's make maps for top 20 CFS Areas.
+# Mapping (Copied from below for 2012 Prediction code)
+counties = map_data("county")
+data("county.fips")
+
+county.fips$region = substr(county.fips$polyname, 1,(regexpr("\\,",county.fips$polyname)-1))
+county.fips$subregion = substr(county.fips$polyname, (regexpr("\\,",county.fips$polyname)+1), nchar(county.fips$polyname))
+county.fips$subregion = ifelse(regexpr("\\:",county.fips$subregion) == -1,
+                               county.fips$subregion,substr(county.fips$subregion,1,
+                                                            regexpr("\\:",county.fips$subregion)-1))
+
+full_county = merge(counties, county.fips, by = c("region","subregion"),all.x=T)
+
+full_county$`ANSI CNTY` = as.numeric(substr(as.character(full_county$fips),nchar(as.character(full_county$fips))-2,nchar(as.character(full_county$fips))))
+full_county$`ANSI ST` = as.numeric(substr(as.character(full_county$fips),
+                                          1,nchar(as.character(full_county$fips))-3))
+
+fuller = merge(full_county, cfs_cwk, by = c("ANSI ST", "ANSI CNTY"),all.x=T)
+
+# Mapping NYC
+cfs_nyc = subset(cfs_20, orig_cfs12 == "E330000US3640800000")
+
+fuller$Outflow13_migs = cfs_nyc$Outflow13_migs[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)]
+fuller$Inflow13_migs = cfs_nyc$Inflow13_migs[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)]
+fuller$distances = cfs_nyc$distances[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)]
+fuller$orig_POPESTIMATE2011_origs = cfs_nyc$orig_POPESTIMATE2011_origs[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)]
+fuller$dest_POPESTIMATE2011_dests = cfs_nyc$dest_POPESTIMATE2011_dests[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)]
+fuller$tot_trade12 = cfs_nyc$trade_out_07[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)] + 
+                      cfs_nyc$trade_out_12[match(fuller$CFS12_GEOID,cfs_nyc$dest_cfs12)]
+
+fuller = subset(fuller, CFS12_GEOID != "E330000US3640800000")
+
+#fuller2 = merge(fuller, cfs_20, by.x= "CFS12_GEOID", by.y = "dest_cfs12")
+
+ditch_the_axis <- theme(
+  axis.text = element_blank(),
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),
+  panel.border = element_blank(),
+  panel.grid = element_blank(),
+  axis.title = element_blank()
+)
 
 
 
-flow_cfs$orig_POPESTIMATE2012
+# NYC Migration Map
+ggplot(data = counties, mapping = aes(x = long, y = lat, group = group)) + 
+  coord_fixed(1.3) + 
+  geom_polygon(color = "black", fill = "gray") +
+  geom_polygon(data = fuller, 
+               aes(fill = (Outflow13_migs+Inflow13_migs))) +
+  geom_polygon(color = "black", fill = NA) +
+  theme_bw() + 
+  scale_fill_gradientn(trans="log10",colours = rev(rainbow(7))) + 
+  ditch_the_axis +
+  labs(fill="Total Migration") +
+  ggtitle(paste(cfs_cwk$CFS12_NAME[match("E330000US3640800000",cfs_cwk$CFS12_GEOID)], ": Total Migration"))
+
+# NYC Residual with Trade
+
+preds = mig_reg12_20$coefficients[1,1] + mig_reg12_20$coefficients[2,1] * log(fuller$distances) + 
+  mig_reg12_20$coefficients[3,1] * log(fuller$orig_POPESTIMATE2011_origs) + 
+  mig_reg12_20$coefficients[4,1] * log(fuller$dest_POPESTIMATE2011_dests) + mig_reg12_20$coefficients[5,1] * log(fuller$tot_trade12)
+
+ggplot(data = counties, mapping = aes(x = long, y = lat, group = group)) + 
+  coord_fixed(1.3) + 
+  geom_polygon(color = "black", fill = "gray") +
+  geom_polygon(data = fuller, 
+               aes(fill = (log(Outflow13_migs+Inflow13_migs) - preds))) +
+  geom_polygon(color = "black", fill = NA) +
+  theme_bw() + 
+  scale_fill_gradientn(colours = rev(rainbow(7))) + 
+  ditch_the_axis +
+  labs(fill="Total Migration") +
+  ggtitle(paste(cfs_cwk$CFS12_NAME[match("E330000US3640800000",cfs_cwk$CFS12_GEOID)], 
+                ":\nLog (Actual Migration/Predicted Migration) (incl. Trade)"))
+
+# NYC Residual without Trade
+preds_not = mig_reg12_2_20$coefficients[1,1] + mig_reg12_2_20$coefficients[2,1] * log(fuller$distances) + 
+  mig_reg12_2_20$coefficients[3,1] * log(fuller$orig_POPESTIMATE2011_origs) + 
+  mig_reg12_2_20$coefficients[4,1] * log(fuller$dest_POPESTIMATE2011_dests)
+
+ggplot(data = counties, mapping = aes(x = long, y = lat, group = group)) + 
+  coord_fixed(1.3) + 
+  geom_polygon(color = "black", fill = "gray") +
+  geom_polygon(data = fuller, 
+               aes(fill = (log(Outflow13_migs+Inflow13_migs) - preds_not))) +
+  geom_polygon(color = "black", fill = NA) +
+  theme_bw() + 
+  scale_fill_gradientn(colours = rev(rainbow(7))) + 
+  ditch_the_axis +
+  labs(fill="Total Migration") +
+  ggtitle(paste(cfs_cwk$CFS12_NAME[match("E330000US3640800000",cfs_cwk$CFS12_GEOID)], 
+                ":\nLog of (Actual Migration/Predicted Migration) (excl. Trade)"))
 
 
-
-flow_cfs_reg2 = subset(flow_cfs_reg, )
 
 
 
@@ -491,7 +601,6 @@ full_county$`ANSI ST` = as.numeric(substr(as.character(full_county$fips),
                                           1,nchar(as.character(full_county$fips))-3))
 
 fuller = merge(full_county, cfs_cwk, by = c("ANSI ST", "ANSI CNTY"),all.x=T)
-testing = merge(full_county, cfs_cwk, by = c("ANSI ST", "ANSI CNTY"),all=T)
 
 # Mapping New Orleans
 for(i in 1:length(inflow_post)){
