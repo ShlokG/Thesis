@@ -191,6 +191,38 @@ colnames(flow_df)[(ncol(flow_df)-ncol(cty10)+3):ncol(flow_df)] = paste0("dest_",
                                                                         colnames(flow_df)[(ncol(flow_df)-ncol(cty10)+3):ncol(flow_df)])
 
 
+# Key is getting distances:
+## Use mean lat/long of each CFS area (basically means of county boundaries in CFS Areas)
+## We don't weigh the distance by the population
+geoCounty$statefips = as.numeric(substr(as.character(geoCounty$fips), 1,2))
+geoCounty$countyfips = as.numeric(substr(as.character(geoCounty$fips), 3,5))
+
+#cty_center = t(combn(geoCounty$fips,2))
+#colnames(cty_center) = c("orig","dest")
+flow_df$orig_lon = geoCounty[match(paste(flow_df$y1_statefips,flow_df$y1_countyfips,sep=","),
+                                   paste(geoCounty$statefips,geoCounty$countyfips,sep=",")),4]
+flow_df$orig_lat = geoCounty[match(paste(flow_df$y1_statefips,flow_df$y1_countyfips,sep=","),
+                                   paste(geoCounty$statefips,geoCounty$countyfips,sep=",")),5]
+flow_df$dest_lon = geoCounty[match(paste(flow_df$y2_statefips,flow_df$y2_countyfips,sep=","),
+                                   paste(geoCounty$statefips,geoCounty$countyfips,sep=",")),4]
+flow_df$dest_lat = geoCounty[match(paste(flow_df$y2_statefips,flow_df$y2_countyfips,sep=","),
+                                   paste(geoCounty$statefips,geoCounty$countyfips,sep=",")),5]
+
+spherical_law_cosines = function(lat1,lon1,lat2,lon2){
+  return(cos(sin(lat1*pi/180)*sin(lat2*pi/180) + 
+               cos(lat1*pi/180)*cos(lat2*pi/180)*
+               cos(lon2*pi/180-lon1*pi/180)) * 6371000)
+}
+
+flow_df$distance = spherical_law_cosines(flow_df$orig_lat,
+                                            flow_df$orig_lon,
+                                            flow_df$dest_lat,
+                                            flow_df$dest_lon)
+
+# When aggregating to CFS, multiply by population and 
+## then divide by the sum of the population of each county
+## For populating weighting
+
 # Read in trade data
 cfs07 = read.csv("../CFS_2007_00A20/CFS_2007_00A20.csv")
 cfs12 = read.csv("../CFS_2012_00A19/CFS_2012_00A19.csv")
@@ -227,7 +259,7 @@ flow_df$dest_cfs12 = cfs_cwk[match(paste(flow_df$y2_statefips, flow_df$y2_county
 flow_df = subset(flow_df, y1_statefips < 57 & y2_statefips < 57 & y1_statefips >= 0 & y2_statefips >= 0)
 
 flow_df$trade_out_07 = cfs07$VAL[match(paste(flow_df$orig_cfs,as.numeric(flow_df$dest_cfs)), paste(as.character(cfs07$GEO.id),cfs07$DDESTGEO.id))]
-flow_df$trade_out_12 = cfs12$VAL[match(paste(flow_df$orig_cfs12,flow_df$dest_cfs12), paste(cfs12$GEO.id,cfs12$DDESTGEO.id))]
+flow_df$trade_out_12 = cfs12$VAL[match(paste(flow_df$orig_cfs12,flow_df$dest_cfs12), paste(as.character(cfs12$GEO.id),cfs12$DDESTGEO.id))]
 
 # flow_df$trade_out_12 = cfs12$SHIPMT_VALUE[match(paste(flow_df$orig_cfs12,flow_df$dest_cfs12), 
 #                                        paste(paste(cfs12$ORIG_STATE, cfs12$ORIG_MA, sep=","),
@@ -251,16 +283,100 @@ flow_df$trade_in_12 = flow_df$trade_out_12[match(paste(paste(flow_df$y1_statefip
 # flow_cfs$trade_out_12 = flow_cfs$trade_out_12 / 1000000
 # flow_cfs$trade_in_12 = flow_cfs$trade_in_12 / 1000000
 
+# Getting population estimate per CFS Area
+flow_df2 = flow_df %>%
+  group_by(y1_statefips, y1_countyfips) %>%
+  mutate_at(vars(orig_POPESTIMATE2000:orig_POPESTIMATE2018),
+            function(x){ifelse(all(is.na(x)), NA, x[which(!is.na(x))])})
+
+
+# Unique origin counties
+unik <- !(duplicated(paste(flow_df$y1_countyfips,flow_df$y1_statefips)))  ## logical vector of unique values
+destk <- !(duplicated(paste(flow_df$y2_countyfips, flow_df$y2_statefips)))  ## logical vector of unique dest values
+
+# Rough Approximation: Assuming population values not duplicated for any county in a CFS Area
+
+funs_cfs = list(
+  origs=function(x){
+    unik <- !(duplicated(x))
+    sum(x[unik],na.rm=T)},
+  dests=function(x){
+    destk <- !(duplicated(x))
+    sum(x[destk],na.rm=T)},
+  migs=function(x){sum(x,na.rm=T)})
+
+
 # Aggregating data at CFS level
+## Not Population Weighted Distance (CFS Area should take care of that)
 flow_cfs = flow_df %>%
-  group_by(orig_cfs, dest_cfs, orig_cfs12,dest_cfs12) %>%
+  group_by(orig_cfs12,dest_cfs12) %>%
   mutate(trade_out_07 = ifelse(all(is.na(trade_out_07)),NA,trade_out_07[which(!is.na(trade_out_07))]),
          trade_in_07 = ifelse(all(is.na(trade_in_07)),NA,trade_in_07[which(!is.na(trade_in_07))]),
          trade_out_12 = ifelse(all(is.na(trade_out_12)),NA,trade_out_12[which(!is.na(trade_out_12))]),
-         trade_in_12 = ifelse(all(is.na(trade_in_12)),NA,trade_in_12[which(!is.na(trade_in_12))])) %>%
-  group_by(orig_cfs, dest_cfs, orig_cfs12, dest_cfs12, 
-           trade_out_07, trade_in_07, trade_out_12, trade_in_12) %>%
-  summarise_at(vars(Outflow16:Inflow05,orig_POPESTIMATE2000:dest_POPESTIMATE2018),sum,na.rm=T)
+         trade_in_12 = ifelse(all(is.na(trade_in_12)),NA,trade_in_12[which(!is.na(trade_in_12))]),
+         distances = mean(distance,na.rm=T)) %>%
+  group_by(orig_cfs12, dest_cfs12, 
+           trade_out_07, trade_in_07, trade_out_12, trade_in_12,distances) %>%
+  summarise_at(vars(Outflow16:Inflow05,orig_POPESTIMATE2000:dest_POPESTIMATE2018),
+               funs_cfs)
+
+# Removing unnecessary columns
+flow_cfs = flow_cfs[,-c(152:189)]
+flow_cfs = flow_cfs[,-c(112:120)]
+flow_cfs = flow_cfs[,-c(61:101)]
+flow_cfs = flow_cfs[,-c(42:51)]
+flow_cfs = flow_cfs[,-c(10:31)]
+
+
+
+
+# 09/23/19: Let's calculate the gravity equation 
+# Gravity Equation for Migration
+## ln(F_{ij}) = \beta_0 + \beta_1 ln(M_i) + \beta_2 ln(M_j) - \beta_3 ln(D_{ij}) + \epsilon_{ij}
+## Here, M stands for population and D for distance
+
+# Regression for 2007
+flow_cfs_reg = subset(flow_cfs, Outflow08_migs+Inflow08_migs > 0)
+
+mig_reg1 = summary(lm(I(log(Outflow08_migs+Inflow08_migs)) ~ I(log(distances)) + 
+                        I(log(orig_POPESTIMATE2006_origs)) + I(log(dest_POPESTIMATE2006_dests)) + 
+                        I(log(trade_out_07+trade_in_07)), data=flow_cfs_reg))
+
+mig_reg2 = summary(lm(I(log(Outflow08_migs+Inflow08_migs)) ~ I(log(distances)) + 
+                        I(log(orig_POPESTIMATE2006_origs)) + I(log(dest_POPESTIMATE2006_dests)), data=flow_cfs_reg))
+
+
+# Regression for 2012
+flow_cfs_reg2 = subset(flow_cfs, Outflow13_migs+Inflow13_migs > 0)
+
+mig_reg12 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)) + 
+                        I(log(orig_POPESTIMATE2011_origs)) + I(log(dest_POPESTIMATE2011_dests)) + 
+                        I(log(trade_out_07+trade_in_07)), data=flow_cfs_reg2))
+
+mig_reg12_2 = summary(lm(I(log(Outflow13_migs+Inflow13_migs)) ~ I(log(distances)) + 
+                        I(log(orig_POPESTIMATE2011_origs)) + I(log(dest_POPESTIMATE2011_dests)), data=flow_cfs_reg2))
+
+
+# Subsetting to top 20 CFS Areas by population
+flow_cfs_max = subset(flow_cfs,orig_cfs12==dest_cfs12)
+flow_cfs_max$orig_POPESTIMATE2012_origs[order(-flow_cfs_max$orig_POPESTIMATE2012_origs)[1:20]]
+
+
+
+flow_cfs$orig_POPESTIMATE2012
+
+
+
+flow_cfs_reg2 = subset(flow_cfs_reg, )
+
+
+
+
+
+
+
+
+
 
 # Trade per capita
 pop_red = flow_cfs %>%
@@ -316,7 +432,7 @@ outflow_fin = function(norleans){
     
     norleans$Trade_Out_Fin = rowSums(cbind(norleans$Trade_Out_Fin, cty_inc[match(norleans$orig_cfs12, trades$dest_cfs12)]),na.rm=T)
     
-    if (norleans$orig_cfs12[i] == norleans$dest_cfs12_repeat[1]){
+    if(norleans$orig_cfs12[i] == norleans$dest_cfs12_repeat[1]){
       norleans$existing_net = norleans$trade_out_07 / sum(norleans$trade_out_07,na.rm=T)
     }
   }
@@ -326,7 +442,9 @@ outflow_fin = function(norleans){
   return(norleans)
 }
 
-outflow_post = flow_cfs %>%
+
+# Removing NAs from analysis and then getting change to existing network
+outflow_post = subset(flow_cfs, !is.na(orig_cfs12) & !is.na(dest_cfs12_repeat)) %>%
   group_by(dest_cfs12) %>%
   group_map(~ outflow_fin(.x))
 
@@ -493,37 +611,14 @@ median(act_err,na.rm=T)
 ## ln(F_{ij}) = \beta_0 + \beta_1 ln(M_i) + \beta_2 ln(M_j) - \beta_3 ln(D_{ij}) + \epsilon_{ij}
 ## Here, M stands for population and D for distance
 
-# Key is getting distances:
-## Use mean lat/long of each CFS area (basically means of county boundaries in CFS Areas)
-cty_center = t(combn(geoCounty$fips,2))
-colnames(cty_center) = c("orig","dest")
-cty_center$orig_lon = geoCounty[match(cty_center$orig,
-                                      geoCounty$fips),4]
-cty_center$orig_lat = geoCounty[match(cty_center$orig,
-                                      geoCounty$fips),5]
-cty_center$dest_lon = geoCounty[match(cty_center$dest,
-                                      geoCounty$fips),4]
-cty_center$dest_lat = geoCounty[match(cty_center$dest,
-                                      geoCounty$fips),5]
-
-spherical_law_cosines = function(lat1,lon1,lat2,lon2){
-  return(cos(sin(lat1*pi/180)*sin(lat2*pi/180) + 
-               cos(lat1*pi/180)*cos(lat2*pi/180)*
-               cos(lon2*pi/180-lon1*pi/180)) * 6371000)
-}
-
-cty_center$distance = spherical_law_cosines(cty_center$orig_lat,
-                                            cty_center$orig_lon,
-                                            cty_center$dest_lat,
-                                            cty_center$dest_lon)
-
-
 fuller2 = merge(fuller2, cty_center,by.x=c(),
                 by.y=c("orig","dest"),all.x=T)
 
 # Regression
+lm(ln(Migration_Out) ~ I(ln(distance)) + I(ln(orig_pop)) + I(ln(dest_pop)),data=fuller2)
 
 # Filter to top 20 cities by population
+
 
 #fuller2$Trade_Fin_Out = 
 
